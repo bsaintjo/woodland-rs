@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use petgraph::graph::NodeIndex;
-use petgraph::{data::Build, Graph};
+use petgraph::Graph;
+use petgraph::{graph::NodeIndex, visit::EdgeRef};
 
 use crate::criterion;
 
@@ -81,22 +81,79 @@ impl Data {
     }
 }
 
+#[derive(Clone)]
 pub struct DecisionTreeBuilder {
     max_depth: usize,
     min_samples: usize,
 }
 
 impl DecisionTreeBuilder {
-    pub fn new() -> Self {
+    fn new() -> Self {
         DecisionTreeBuilder {
             max_depth: 1,
             min_samples: 2,
         }
     }
+
+    pub fn max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    pub fn min_samples(mut self, max_depth: usize) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
     pub fn fit(&self, data: &Data) -> DecisionTree {
         let mut tree = Graph::default();
-        let root = TreeNode::from_data(data, &mut tree);
+        let root = self.grow_tree(data, &mut tree);
         DecisionTree { tree, root }
+    }
+
+    fn grow_tree(&self, data: &Data, tree: &mut DTree) -> NodeIndex {
+        let total_info = criterion::gini_impurity(&data.targets);
+        let mut best_gain = 0.0f32;
+        let mut best_criterion = None;
+        let mut best_data_split = None;
+
+        // f32 doesn't implement Eq so we can't put them in
+        // a HashSet, so we may have duplicates
+
+        for (feat_idx, column) in data.features.iter().enumerate() {
+            for &value in column {
+                let split_data = data.split_data(feat_idx, value);
+                let lt_info = (split_data.less_than_eq.targets.len() as f32)
+                    * criterion::gini_impurity(&split_data.less_than_eq.targets);
+                let gt_info = (split_data.greater_than.targets.len() as f32)
+                    * criterion::gini_impurity(&split_data.greater_than.targets);
+
+                let gain = total_info - (lt_info + gt_info);
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_criterion = Some((feat_idx, value));
+                    best_data_split = Some(split_data)
+                }
+            }
+        }
+        if let Some((col_idx, value)) = best_criterion {
+            let node = TreeNode::Internal(InternalNode {
+                criterion: value,
+                col_idx,
+            });
+            let node_idx = tree.add_node(node);
+            let lt_idx = self.grow_tree(&best_data_split.as_ref().unwrap().less_than_eq, tree);
+            let gt_idx = self.grow_tree(&best_data_split.unwrap().greater_than, tree);
+            tree.add_edge(node_idx, lt_idx, true);
+            tree.add_edge(node_idx, gt_idx, true);
+
+            node_idx
+        } else {
+            let node = TreeNode::Leaf {
+                outcome: data.most_common_target().unwrap(),
+            };
+            tree.add_node(node)
+        }
     }
 
     fn should_stop(&self, tree: &DTree) -> bool {
@@ -110,17 +167,36 @@ pub struct DecisionTree {
 }
 
 impl DecisionTree {
-    fn new() -> Self {
-        let mut tree = Graph::default();
-        let root = tree.add_node(todo!());
-        DecisionTree { tree, root }
-    }
-
-    pub fn predict(&self, features: Vec<Vec<f32>>) -> usize {
-        todo!()
+    /// Returns a list of predictions given a list of features
+    /// 
+    /// Can panic if number of columns (length of each element in features) is not the same as what was trained on.
+    pub fn predict(&self, features: Vec<Vec<f32>>) -> Vec<usize> {
+        let mut predictions = Vec::new();
+        for feature in features {
+            let mut node_idx = self.root;
+            let prediction = loop {
+                match self.tree[node_idx] {
+                    TreeNode::Internal(ref int) => {
+                        let is_lt = feature[int.col_idx] <= int.criterion;
+                        let next_node = self
+                            .tree
+                            .edges(node_idx)
+                            .filter(|x| *x.weight() == is_lt)
+                            .map(|x| x.target())
+                            .next()
+                            .unwrap();
+                        node_idx = next_node;
+                    }
+                    TreeNode::Leaf { outcome } => break outcome,
+                }
+            };
+            predictions.push(prediction);
+        }
+        predictions
     }
 }
 
+/// Calculate the best
 fn best_split(data: &Data) -> Option<(usize, f32)> {
     let total_info = criterion::gini_impurity(&data.targets);
     let mut best_gain = 0.0f32;
@@ -228,7 +304,7 @@ mod test {
         let tree = DecisionTreeBuilder::new().fit(&data);
         let new_data = vec![vec![20., 0.9f32]];
         let result = tree.predict(new_data);
-        assert_eq!(result, 1);
+        assert_eq!(result, vec![1]);
     }
 
     #[test]
